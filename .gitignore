@@ -1,0 +1,31 @@
+## Environment & Secrets
+.env
+.env.local
+*.env
+secrets.json
+
+## Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+## Temporary working files
+temp/
+
+## Images & binary blobs
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+
+## OS
+.DS_Store
+Thumbs.db
+*.tmp
