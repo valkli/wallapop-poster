@@ -2,12 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 update_notion_wallapop.py
-Updates a Notion product page with the published Wallapop URL.
+Updates a Notion product page after successful Wallapop publication:
+  - Writes listing URL to "Wallapop Posted"
+  - Sets "Wal 1" checkbox = True  (account slot tracker)
 
 Usage:
   python update_notion_wallapop.py <notion_id> <wallapop_url>
   python update_notion_wallapop.py <wallapop_url>       ← reads notion_id from temp/product_data.json
-  python update_notion_wallapop.py                       ← reads both from env WALLAPOP_URL
+  python update_notion_wallapop.py                       ← reads notion_id from temp/product_data.json,
+                                                           URL from env WALLAPOP_URL
 """
 
 import os
@@ -30,7 +33,11 @@ PRODUCT_DATA_FILE = Path(__file__).parent / 'temp' / 'product_data.json'
 
 
 def update_notion(notion_id: str, wallapop_url: str) -> bool:
-    """Update Notion page with published Wallapop URL."""
+    """
+    Update Notion page:
+      - Wallapop Posted ← wallapop_url
+      - Wal 1 checkbox  ← True
+    """
     payload = {
         'properties': {
             'Wallapop Posted': {
@@ -43,6 +50,9 @@ def update_notion(notion_id: str, wallapop_url: str) -> bool:
                         }
                     }
                 ]
+            },
+            'Wal 1': {
+                'checkbox': True
             }
         }
     }
@@ -54,45 +64,57 @@ def update_notion(notion_id: str, wallapop_url: str) -> bool:
     )
 
     if resp.status_code == 200:
-        print(f'OK Updated: {notion_id} → {wallapop_url}')
+        print(f'OK Updated: {notion_id}')
+        print(f'   Wallapop Posted = {wallapop_url}')
+        print(f'   Wal 1 = True')
         return True
     else:
+        # If Wal 1 doesn't exist yet, try without it
+        if '"Wal 1"' in resp.text or 'property' in resp.text.lower():
+            print(f'WARN: Wal 1 field not found in DB, writing URL only', file=sys.stderr)
+            payload2 = {
+                'properties': {
+                    'Wallapop Posted': payload['properties']['Wallapop Posted']
+                }
+            }
+            resp2 = requests.patch(
+                f'https://api.notion.com/v1/pages/{notion_id}',
+                headers=HEADERS, json=payload2
+            )
+            if resp2.status_code == 200:
+                print(f'OK Updated URL only (Wal 1 field missing): {notion_id} → {wallapop_url}')
+                return True
+
         print(f'ERROR {resp.status_code}: {resp.text[:300]}')
         return False
 
 
 def main():
-    notion_id = None
+    notion_id   = None
     wallapop_url = None
 
     if len(sys.argv) == 3:
-        notion_id = sys.argv[1].strip()
+        notion_id    = sys.argv[1].strip()
         wallapop_url = sys.argv[2].strip()
     elif len(sys.argv) == 2:
         wallapop_url = sys.argv[1].strip()
         if PRODUCT_DATA_FILE.exists():
-            with open(PRODUCT_DATA_FILE, encoding='utf-8') as f:
-                data = json.load(f)
+            data = json.loads(PRODUCT_DATA_FILE.read_text(encoding='utf-8'))
             notion_id = data.get('notion_id')
         else:
             print('ERROR: product_data.json not found and no notion_id provided')
             sys.exit(1)
-    elif len(sys.argv) == 1:
+    else:
         if PRODUCT_DATA_FILE.exists():
-            with open(PRODUCT_DATA_FILE, encoding='utf-8') as f:
-                data = json.load(f)
-            notion_id = data.get('notion_id')
+            data = json.loads(PRODUCT_DATA_FILE.read_text(encoding='utf-8'))
+            notion_id    = data.get('notion_id')
             wallapop_url = os.getenv('WALLAPOP_URL')
             if not wallapop_url:
                 print('ERROR: WALLAPOP_URL env variable not set')
-                print('Usage: WALLAPOP_URL=https://... python update_notion_wallapop.py')
                 sys.exit(1)
         else:
             print('ERROR: product_data.json not found')
             sys.exit(1)
-    else:
-        print('Usage: python update_notion_wallapop.py [notion_id] <wallapop_url>')
-        sys.exit(1)
 
     if not notion_id:
         print('ERROR: notion_id is empty')

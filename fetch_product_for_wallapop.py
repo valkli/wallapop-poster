@@ -2,14 +2,20 @@
 # -*- coding: utf-8 -*-
 """
 fetch_product_for_wallapop.py
-Fetches the next UNPUBLISHED product from Notion DB (Product_Variants_GangaBox).
+Fetches the next product ready for Wallapop publication from Notion DBs.
 
 Filters:
-  - Wallapop Posted = empty (not yet published on Wallapop)
-  - In Stock = true
+  - Wallapop Posted = empty  (not yet published)
+  - In Stock = False         (out of physical stock → designated for online sale)
+  - donde = "magazin" OR "sklad"
+  - Selling Price > 15 EUR
+
+Sources (round-robin):
+  DB1: Product_Variants_GangaBox   (2bd12f742f9e8198bfb3dce06af14f58)
+  DB2: Product_Variants             (27f12f742f9e81648959ee3d597c4e7e)
 
 Saves result to: wallapop-poster/temp/product_data.json
-Prints: OK <product_name> | remaining: N | NO_PRODUCTS
+Prints: OK <product_name> | NO_PRODUCTS
 """
 
 import os
@@ -22,7 +28,11 @@ sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
 NOTION_API_KEY = os.getenv('NOTION_API_KEY')
-DB_ID = '2bd12f742f9e8198bfb3dce06af14f58'  # Product_Variants_GangaBox
+
+DB1_ID = '2bd12f742f9e8198bfb3dce06af14f58'   # Product_Variants_GangaBox
+DB2_ID = os.getenv('WALLAPOP_DB2_ID', '27f12f742f9e81648959ee3d597c4e7e')  # Product_Variants
+
+MIN_PRICE = 15.0
 
 HEADERS = {
     'Authorization': f'Bearer {NOTION_API_KEY}',
@@ -30,61 +40,99 @@ HEADERS = {
     'Content-Type': 'application/json'
 }
 
-OUT_DIR = Path(__file__).parent / 'temp'
+OUT_DIR  = Path(__file__).parent / 'temp'
 OUT_FILE = OUT_DIR / 'product_data.json'
+CURSOR_FILE = OUT_DIR / 'wal_db_cursor.json'
 
 
-def fetch_next_pending():
+def get_next_db_id():
+    """Round-robin between DB1 and DB2."""
+    CURSOR_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if CURSOR_FILE.exists():
+        try:
+            state = json.loads(CURSOR_FILE.read_text())
+            last = state.get('last_db', 1)
+        except Exception:
+            last = 1
+    else:
+        last = 1
+
+    next_db = 2 if last == 1 else 1
+    CURSOR_FILE.write_text(json.dumps({'last_db': next_db}))
+    return (DB1_ID if next_db == 1 else DB2_ID), next_db
+
+
+def build_filter():
     """
-    Query Notion for the next product where:
-      - In Stock = true
-      - Wallapop Posted = empty
-    Returns first match or None.
+    Wallapop publication filter:
+      - Wallapop Posted empty (not yet published)
+      - In Stock = False  (out of physical stock → online liquidation)
+      - donde = magazin OR sklad
+      - Selling Price > 15
     """
-    payload = {
-        "filter": {
-            "and": [
-                {
-                    "property": "In Stock",
-                    "checkbox": {"equals": True}
-                },
-                {
-                    "property": "Wallapop Posted",
-                    "rich_text": {"is_empty": True}
-                }
-            ]
-        },
-        "sorts": [
-            {"property": "Created time", "direction": "ascending"}
-        ],
-        "page_size": 1
+    return {
+        "and": [
+            {
+                "property": "Wallapop Posted",
+                "rich_text": {"is_empty": True}
+            },
+            {
+                "property": "In Stock",
+                "checkbox": {"equals": False}
+            },
+            {
+                "or": [
+                    {"property": "donde", "rich_text": {"contains": "magazin"}},
+                    {"property": "donde", "rich_text": {"contains": "sklad"}}
+                ]
+            },
+            {
+                "property": "Selling Price",
+                "number": {"greater_than": MIN_PRICE}
+            }
+        ]
     }
 
+
+def fetch_next_pending(db_id):
+    """Query Notion for the next matching product in db_id. Returns page or None."""
+    payload = {
+        "filter": build_filter(),
+        "sorts": [{"property": "Created time", "direction": "ascending"}],
+        "page_size": 1
+    }
     resp = requests.post(
-        f'https://api.notion.com/v1/databases/{DB_ID}/query',
-        headers=HEADERS,
-        json=payload
+        f'https://api.notion.com/v1/databases/{db_id}/query',
+        headers=HEADERS, json=payload
     )
-
     if resp.status_code == 404:
-        print('ERROR: DB not found. Check DB_ID or if "Wallapop Posted" field exists in Notion.')
-        print('Create a "Wallapop Posted" text field in the Notion DB first.')
-        sys.exit(1)
-
+        print(f'ERROR: DB {db_id} not found', file=sys.stderr)
+        return None
     if resp.status_code != 200:
-        print(f'ERROR: Notion API {resp.status_code}: {resp.text[:200]}')
+        print(f'ERROR: Notion {resp.status_code}: {resp.text[:200]}')
         sys.exit(1)
-
     results = resp.json().get('results', [])
     return results[0] if results else None
 
 
-def extract_product(page):
+def fetch_from_any_db():
+    """Try round-robin DB, fallback to the other. Returns (page, db_id) or (None, None)."""
+    db_id, _ = get_next_db_id()
+    page = fetch_next_pending(db_id)
+    if page:
+        return page, db_id
+
+    other = DB2_ID if db_id == DB1_ID else DB1_ID
+    page = fetch_next_pending(other)
+    return (page, other) if page else (None, None)
+
+
+def extract_product(page, db_id):
     """Extract relevant fields from a Notion page object."""
     props = page['properties']
     data = {
         'notion_id': page['id'],
-        'db_id': DB_ID,
+        'db_id': db_id,
         'properties': {}
     }
 
@@ -110,7 +158,6 @@ def extract_product(page):
             except (KeyError, IndexError):
                 data['properties'][key] = None
 
-    # Cover image
     if page.get('cover'):
         cover = page['cover']
         if cover.get('external'):
@@ -121,52 +168,27 @@ def extract_product(page):
     return data
 
 
-def build_wallapop_summary(data):
-    """
-    Build a summary text for Wallapop AI (max 50 chars).
-    Format: "<Name> <Category>"
-    """
-    props = data['properties']
-    name = (props.get('Name') or '').strip()
-    category = (props.get('Category') or '').strip()
-
-    summary = name
-    if category and len(summary) + len(category) + 1 <= 48:
-        summary = f"{summary} {category}"
-
-    return summary[:50]
-
-
-def count_pending():
-    """Count how many products are still pending Wallapop publication."""
-    payload = {
-        "filter": {
-            "and": [
-                {"property": "In Stock", "checkbox": {"equals": True}},
-                {"property": "Wallapop Posted", "rich_text": {"is_empty": True}}
-            ]
-        },
-        "page_size": 1
-    }
+def count_pending(db_id):
+    """Return approximate count of pending products in db_id."""
+    payload = {"filter": build_filter(), "page_size": 1}
     resp = requests.post(
-        f'https://api.notion.com/v1/databases/{DB_ID}/query',
-        headers=HEADERS,
-        json=payload
+        f'https://api.notion.com/v1/databases/{db_id}/query',
+        headers=HEADERS, json=payload
     )
-    data = resp.json()
-    has_more = data.get('has_more', False)
-    results_count = len(data.get('results', []))
-    return '100+' if has_more else str(results_count)
+    if resp.status_code != 200:
+        return '?'
+    d = resp.json()
+    return '100+' if d.get('has_more') else str(len(d.get('results', [])))
 
 
 def main():
-    if not NOTION_API_KEY:
-        print('ERROR: NOTION_API_KEY environment variable not set')
-        sys.exit(1)
-
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    product = fetch_next_pending()
+    if not NOTION_API_KEY:
+        print('ERROR: NOTION_API_KEY not set')
+        sys.exit(1)
+
+    product, db_id = fetch_from_any_db()
 
     if not product:
         print('NO_PRODUCTS')
@@ -174,25 +196,21 @@ def main():
             OUT_FILE.unlink()
         sys.exit(0)
 
-    data = extract_product(product)
-    name = data['properties'].get('Name', 'Unknown')
-
-    # Add wallapop-specific summary
-    data['wallapop_summary'] = build_wallapop_summary(data)
+    data = extract_product(product, db_id)
+    props = data['properties']
+    name   = props.get('Name', 'Unknown')
+    price  = props.get('Selling Price', 0)
+    donde  = props.get('donde', '?')
+    weight = (props.get('Weight') or 0)
+    images = len(props.get('Image') or [])
 
     with open(OUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-    pending = count_pending()
-    print(f'OK {name} | remaining: {pending}')
-    print(f'Summary for Wallapop: "{data["wallapop_summary"]}"')
-
-    # Print key fields for easy review
-    props = data['properties']
-    print(f'  Price: {props.get("Selling Price")}€')
-    print(f'  Weight: {props.get("Weight")}g → {(props.get("Weight") or 0)/1000:.1f}kg')
-    print(f'  Images: {len(props.get("Image") or [])} images')
-    print(f'  Notion ID: {data["notion_id"]}')
+    pending  = count_pending(db_id)
+    db_label = 'DB1' if db_id == DB1_ID else 'DB2'
+    print(f'OK {name} | price={price}€ | donde={donde} | {db_label} | remaining~{pending}')
+    print(f'  Weight: {weight}g | Images: {images} | Notion ID: {data["notion_id"]}')
 
 
 if __name__ == '__main__':
