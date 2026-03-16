@@ -23,6 +23,9 @@ import os
 import json
 import base64
 import asyncio
+import time
+import subprocess
+import urllib.request as urllib_req
 import requests
 from pathlib import Path
 
@@ -32,7 +35,36 @@ sys.stderr.reconfigure(encoding='utf-8')
 SCRIPT_DIR   = Path(__file__).parent
 PRODUCT_DATA = SCRIPT_DIR / 'temp' / 'product_data.json'
 IMAGE_FILE   = SCRIPT_DIR / 'temp' / 'product_image.jpg'
-CDP_BASE     = 'http://127.0.0.1:18800'
+CDP_PORT     = 18801  # mixmix profile port
+CDP_BASE     = f'http://127.0.0.1:{CDP_PORT}'
+
+# Browser profile for Wallapop
+CHROMIUM_PATH = r'C:\Users\Val\AppData\Local\ms-playwright\chromium-1208\chrome-win64\chrome.exe'
+BROWSER_PROFILE = r'C:\Users\Val\.openclaw\browser\mixmix'
+
+
+def ensure_browser():
+    """Launch OpenClaw Chromium with mixmix profile if not already running."""
+    try:
+        urllib_req.urlopen(f'{CDP_BASE}/json/version', timeout=3)
+        return True
+    except Exception:
+        pass
+    print('  🚀 Launching browser (mixmix profile)...', file=sys.stderr)
+    subprocess.Popen([
+        CHROMIUM_PATH,
+        f'--user-data-dir={BROWSER_PROFILE}',
+        f'--remote-debugging-port={CDP_PORT}',
+        '--no-first-run', 'about:blank'
+    ])
+    for _ in range(10):
+        time.sleep(2)
+        try:
+            urllib_req.urlopen(f'{CDP_BASE}/json/version', timeout=3)
+            return True
+        except Exception:
+            pass
+    return False
 
 # Wallapop file input selector (directly in main DOM, not shadow DOM)
 FILE_INPUT_SELECTOR = '#dropAreaPreviewInput'
