@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+run_daily_batch.py — Daily batch publisher for Wallapop.
+Publishes 6-8 products from Notion, skipping those without accessible images.
+
+Usage: python wallapop-poster/run_daily_batch.py
+"""
+
+import os
+import sys
+import json
+import time
+import random
+import subprocess
+import requests
+from pathlib import Path
+from datetime import datetime
+
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
+
+WORKSPACE = Path(__file__).parent.parent
+SCRIPT_DIR = Path(__file__).parent
+NOTION_API_KEY = os.environ.get('NOTION_API_KEY', '')
+
+HEADERS = {
+    'Authorization': f'Bearer {NOTION_API_KEY}',
+    'Notion-Version': '2022-06-28',
+    'Content-Type': 'application/json'
+}
+
+IMG_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                  '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+    'Referer': 'https://www.google.com/',
+}
+
+MAX_PRODUCTS = 8
+MIN_PRICE = 15.0
+
+
+def run(cmd, timeout=60):
+    """Run a subprocess command and return stdout."""
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(WORKSPACE))
+    return result.stdout.strip(), result.stderr.strip(), result.returncode
+
+
+def fetch_next_product():
+    """Fetch next product from Notion."""
+    stdout, stderr, rc = run([sys.executable, str(SCRIPT_DIR / 'fetch_product_for_wallapop.py')], timeout=30)
+    print(f'  fetch: {stdout[:100]}', flush=True)
+    if stderr and 'remaining' not in stderr:
+        print(f'  fetch stderr: {stderr[:200]}', flush=True)
+    return stdout
+
+
+def check_image_accessible(url):
+    """Try to download image. Returns (ok, path_or_none)."""
+    if not url:
+        return False, None
+    try:
+        r = requests.get(url, headers=IMG_HEADERS, timeout=20, stream=True)
+        if r.ok and 'image' in r.headers.get('Content-Type', ''):
+            img_path = SCRIPT_DIR / 'temp' / 'product_image.jpg'
+            img_path.parent.mkdir(parents=True, exist_ok=True)
+            img_path.write_bytes(r.content)
+            size_kb = len(r.content) // 1024
+            print(f'  ✓ Image downloaded: {size_kb}KB', flush=True)
+            return True, str(img_path)
+        else:
+            print(f'  ✗ Image failed: HTTP {r.status_code} {r.headers.get("Content-Type", "")}', flush=True)
+            return False, None
+    except Exception as e:
+        print(f'  ✗ Image error: {e}', flush=True)
+        return False, None
+
+
+def mark_no_image(notion_id):
+    """Mark product as NO-IMAGE-SKIP in Notion."""
+    r = requests.patch(
+        f'https://api.notion.com/v1/pages/{notion_id}',
+        headers=HEADERS,
+        json={'properties': {'Wallapop Posted': {'rich_text': [{'type': 'text', 'text': {'content': 'NO-IMAGE-SKIP'}}]}}}
+    )
+    if r.status_code == 200:
+        print(f'  → Marked NO-IMAGE-SKIP: {notion_id[:8]}...', flush=True)
+    else:
+        print(f'  ✗ Failed to mark: {r.status_code}', flush=True)
+
+
+def navigate_to_upload():
+    """Navigate the mixmix browser to Wallapop upload page via CDP."""
+    import asyncio
+    async def nav():
+        try:
+            import websockets
+            # Find first page tab
+            resp = requests.get('http://127.0.0.1:18801/json', timeout=5)
+            tabs = resp.json()
+            ws_url = None
+            for t in tabs:
+                if t.get('type') == 'page':
+                    ws_url = t['webSocketDebuggerUrl']
+                    break
+            if not ws_url:
+                return False
+            async with websockets.connect(ws_url) as ws:
+                await ws.send(json.dumps({'id': 1, 'method': 'Page.navigate', 'params': {'url': 'https://es.wallapop.com/app/catalog/upload'}}))
+                await asyncio.wait_for(ws.recv(), timeout=10)
+            return True
+        except Exception as e:
+            print(f'  CDP nav error: {e}', flush=True)
+            return False
+    return asyncio.run(nav())
+
+
+def publish_product():
+    """Run publish_wallapop_cdp.py and return (success, url)."""
+    stdout, stderr, rc = run([sys.executable, str(SCRIPT_DIR / 'publish_wallapop_cdp.py')], timeout=120)
+    # Show stderr (debug info)
+    for line in stderr.split('\n'):
+        if line.strip():
+            print(f'    {line}', flush=True)
+    print(f'  publish output: {stdout[:200]}', flush=True)
+    if stdout.startswith('OK '):
+        url = stdout[3:].strip()
+        return True, url
+    return False, stdout
+
+
+def update_notion(notion_id, url):
+    """Update Notion with published URL and Wal 1 = True."""
+    stdout, stderr, rc = run([sys.executable, str(SCRIPT_DIR / 'update_notion_wallapop.py'), notion_id, url], timeout=30)
+    print(f'  notion update: {stdout[:100]}', flush=True)
+    return rc == 0
+
+
+def main():
+    published = []
+    skipped = []
+    errors = []
+
+    print(f'\n{"="*60}', flush=True)
+    print(f'🛍️ Wallapop Daily Batch — {datetime.now().strftime("%Y-%m-%d %H:%M")}', flush=True)
+    print(f'Target: {MAX_PRODUCTS} products', flush=True)
+    print(f'{"="*60}\n', flush=True)
+
+    attempts = 0
+    max_attempts = MAX_PRODUCTS + 10  # allow extra skips
+
+    while len(published) < MAX_PRODUCTS and attempts < max_attempts:
+        attempts += 1
+        print(f'\n[{len(published)+1}/{MAX_PRODUCTS}] Fetching product #{attempts}...', flush=True)
+
+        # STEP 1: Fetch product
+        fetch_result = fetch_next_product()
+        if 'NO_PRODUCTS' in fetch_result:
+            print('  → No more products. Stopping.', flush=True)
+            break
+
+        if not fetch_result.startswith('OK '):
+            print(f'  ✗ Unexpected fetch result: {fetch_result}', flush=True)
+            errors.append(f'fetch: {fetch_result}')
+            continue
+
+        # STEP 2: Read product data
+        product_data_path = SCRIPT_DIR / 'temp' / 'product_data.json'
+        if not product_data_path.exists():
+            print('  ✗ product_data.json not found', flush=True)
+            errors.append('product_data.json missing')
+            continue
+
+        with open(product_data_path, encoding='utf-8') as f:
+            data = json.load(f)
+
+        props = data['properties']
+        notion_id = data['notion_id']
+        name = props.get('Name', 'Unknown')
+        price = props.get('Selling Price', 0)
+        donde = props.get('donde', '')
+        images = props.get('Image', [])
+
+        print(f'  Product: {name[:60]}', flush=True)
+        print(f'  Price: {price}€ | donde: {donde} | images: {len(images)}', flush=True)
+
+        # STEP 3: Check image
+        if not images:
+            print('  → No images. Skipping.', flush=True)
+            mark_no_image(notion_id)
+            skipped.append(f'{name[:40]} (нет фото)')
+            continue
+
+        img_ok, img_path = check_image_accessible(images[0])
+        if not img_ok:
+            # Try second image if available
+            img_ok2 = False
+            if len(images) > 1:
+                img_ok2, img_path = check_image_accessible(images[1])
+            if not img_ok2:
+                print('  → Image not accessible (403/error). Skipping.', flush=True)
+                mark_no_image(notion_id)
+                skipped.append(f'{name[:40]} (фото 403)')
+                continue
+
+        # STEP 4: Navigate to upload form
+        print('  → Navigating to Wallapop upload...', flush=True)
+        navigate_to_upload()
+        time.sleep(5)
+
+        # STEP 5-6: Publish via Playwright CDP
+        print('  → Publishing...', flush=True)
+        success, url = publish_product()
+
+        if success:
+            print(f'  ✅ Published: {url}', flush=True)
+            # STEP 7: Update Notion
+            update_notion(notion_id, url)
+            published.append({'name': name[:50], 'price': price, 'donde': donde, 'url': url})
+            # Anti-bot pause
+            pause = random.randint(30, 60)
+            print(f'  ⏳ Anti-bot pause: {pause}s...', flush=True)
+            time.sleep(pause)
+        else:
+            print(f'  ✗ Publish failed: {url}', flush=True)
+            errors.append(f'{name[:40]}: {url[:80]}')
+
+    # Final report
+    print(f'\n{"="*60}', flush=True)
+    print(f'📊 BATCH COMPLETE: {len(published)}/{MAX_PRODUCTS} published', flush=True)
+    print(f'Skipped: {len(skipped)} | Errors: {len(errors)}', flush=True)
+    print(f'{"="*60}\n', flush=True)
+
+    # Save report for Telegram
+    report = {
+        'date': datetime.now().strftime('%Y-%m-%d'),
+        'published': published,
+        'skipped': skipped,
+        'errors': errors
+    }
+    report_path = SCRIPT_DIR / 'temp' / 'daily_report.json'
+    with open(report_path, 'w', encoding='utf-8') as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    print(f'Report saved: {report_path}', flush=True)
+
+    return report
+
+
+if __name__ == '__main__':
+    report = main()
+    sys.exit(0 if report['published'] else 1)
