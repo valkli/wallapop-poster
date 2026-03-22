@@ -118,7 +118,7 @@ def navigate_to_upload():
 
 def publish_product():
     """Run publish_wallapop_cdp.py and return (success, url)."""
-    stdout, stderr, rc = run([sys.executable, str(SCRIPT_DIR / 'publish_wallapop_cdp.py')], timeout=120)
+    stdout, stderr, rc = run([sys.executable, str(SCRIPT_DIR / 'publish_wallapop_cdp.py')], timeout=240)
     # Show stderr (debug info)
     for line in stderr.split('\n'):
         if line.strip():
@@ -137,10 +137,35 @@ def update_notion(notion_id, url):
     return rc == 0
 
 
+def load_published_ids():
+    """Load set of notion_ids already published today (prevents duplicates)."""
+    tracker = SCRIPT_DIR / 'temp' / 'published_today.json'
+    if tracker.exists():
+        try:
+            data = json.loads(tracker.read_text())
+            if data.get('date') == datetime.now().strftime('%Y-%m-%d'):
+                return set(data.get('ids', []))
+        except Exception:
+            pass
+    return set()
+
+
+def save_published_id(notion_id):
+    """Append a notion_id to today's published tracker."""
+    tracker = SCRIPT_DIR / 'temp' / 'published_today.json'
+    ids = load_published_ids()
+    ids.add(notion_id)
+    tracker.write_text(json.dumps({
+        'date': datetime.now().strftime('%Y-%m-%d'),
+        'ids': list(ids)
+    }))
+
+
 def main():
     published = []
     skipped = []
     errors = []
+    published_ids = load_published_ids()
 
     print(f'\n{"="*60}', flush=True)
     print(f'🛍️ Wallapop Daily Batch — {datetime.now().strftime("%Y-%m-%d %H:%M")}', flush=True)
@@ -185,6 +210,12 @@ def main():
         print(f'  Product: {name[:60]}', flush=True)
         print(f'  Price: {price}€ | donde: {donde} | images: {len(images)}', flush=True)
 
+        # Dedup check: skip if already published in this session or today
+        if notion_id in published_ids:
+            print(f'  → SKIP: already published today (dedup)', flush=True)
+            skipped.append(f'{name[:40]} (дубль)')
+            continue
+
         # STEP 3: Check image
         if not images:
             print('  → No images. Skipping.', flush=True)
@@ -215,9 +246,12 @@ def main():
 
         if success:
             print(f'  ✅ Published: {url}', flush=True)
-            # STEP 7: Update Notion
+            # STEP 7: Update Notion + dedup tracker
             update_notion(notion_id, url)
-            published.append({'name': name[:50], 'price': price, 'donde': donde, 'url': url})
+            save_published_id(notion_id)
+            published_ids.add(notion_id)
+            notion_url = f'https://www.notion.so/kliv/{notion_id.replace("-", "")}'
+            published.append({'name': name[:50], 'price': price, 'donde': donde, 'url': url, 'notion_id': notion_id, 'notion_url': notion_url})
             # Anti-bot pause
             pause = random.randint(30, 60)
             print(f'  ⏳ Anti-bot pause: {pause}s...', flush=True)

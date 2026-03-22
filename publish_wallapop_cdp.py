@@ -38,7 +38,13 @@ BROWSER_PROFILE = r'C:\Users\Val\.openclaw\browser\mixmix'
 
 
 def log(msg): print(f'  {msg}', file=sys.stderr, flush=True)
-def ss(page, name): page.screenshot(path=str(SCRIPT_DIR / 'temp' / f'{name}.png')); log(f'📷 {name}')
+def ss(page, name):
+    try:
+        page.screenshot(path=str(SCRIPT_DIR / 'temp' / f'{name}.png'), timeout=10000)
+        log(f'📷 {name}')
+    except Exception:
+        log(f'📷 {name} (screenshot skipped)')
+
 
 def ensure_browser():
     try:
