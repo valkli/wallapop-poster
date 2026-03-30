@@ -161,6 +161,32 @@ def save_published_id(notion_id):
     }))
 
 
+def run_cleanup(execute: bool = False) -> dict:
+    """Run cleanup_wallapop.py and return parsed JSON report. Returns empty report on error."""
+    empty_report = {'to_delete': [], 'bad_urls': [], 'ok': [], '_stats': {}}
+    cmd = [sys.executable, str(SCRIPT_DIR / 'cleanup_wallapop.py')]
+    if execute:
+        cmd.append('--execute')
+    try:
+        stdout, stderr, rc = run(cmd, timeout=120)
+        # Log stderr (cleanup progress logs)
+        for line in stderr.split('\n'):
+            if line.strip():
+                print(f'    {line}', flush=True)
+        if not stdout.strip():
+            print('  ⚠ Cleanup returned no output', flush=True)
+            return empty_report
+        report = json.loads(stdout)
+        return report
+    except json.JSONDecodeError as e:
+        print(f'  ⚠ Cleanup JSON parse error: {e}', flush=True)
+        print(f'  Raw output: {stdout[:300]}', flush=True)
+        return empty_report
+    except Exception as e:
+        print(f'  ⚠ Cleanup exception: {e}', flush=True)
+        return empty_report
+
+
 def main():
     published = []
     skipped = []
@@ -171,6 +197,23 @@ def main():
     print(f'🛍️ Wallapop Daily Batch — {datetime.now().strftime("%Y-%m-%d %H:%M")}', flush=True)
     print(f'Target: {MAX_PRODUCTS} products', flush=True)
     print(f'{"="*60}\n', flush=True)
+
+    # ── PRE-BATCH CLEANUP ─────────────────────────────────────
+    print('🧹 Pre-batch cleanup (execute)...', flush=True)
+    cleanup_report = run_cleanup(execute=True)
+    stats = cleanup_report.get('_stats', {})
+    deleted_count = stats.get('deleted', 0)
+    errors_count = stats.get('errors', 0)
+    bad_urls_count = len(cleanup_report.get('bad_urls', []))
+    to_delete_items = cleanup_report.get('to_delete', [])
+    print(
+        f'  Cleanup done: {deleted_count} listings cleared, '
+        f'{bad_urls_count} bad URLs (left for manual fix), '
+        f'{errors_count} errors',
+        flush=True
+    )
+    print(f'  Still ok: {len(cleanup_report.get("ok", []))} listings', flush=True)
+    print('', flush=True)
 
     attempts = 0
     max_attempts = MAX_PRODUCTS + 10  # allow extra skips
@@ -266,12 +309,39 @@ def main():
     print(f'Skipped: {len(skipped)} | Errors: {len(errors)}', flush=True)
     print(f'{"="*60}\n', flush=True)
 
+    # ── POST-BATCH CLEANUP STATUS (dry-run) ──────────────────
+    print('\n🧹 Post-batch cleanup status (dry-run)...', flush=True)
+    post_cleanup = run_cleanup(execute=False)
+    post_to_delete = len(post_cleanup.get('to_delete', []))
+    post_bad_urls = len(post_cleanup.get('bad_urls', []))
+    post_ok = len(post_cleanup.get('ok', []))
+    print(
+        f'  Post-batch status: {post_ok} ok, '
+        f'{post_to_delete} to_delete, '
+        f'{post_bad_urls} bad_urls (not acted on)',
+        flush=True
+    )
+    print('', flush=True)
+
     # Save report for Telegram
     report = {
         'date': datetime.now().strftime('%Y-%m-%d'),
         'published': published,
         'skipped': skipped,
-        'errors': errors
+        'errors': errors,
+        'cleanup': {
+            'pre_deleted': deleted_count,
+            'pre_deleted_items': [
+                {'name': d['name'][:50], 'reason': d['reason'],
+                 'wallapop_url': d.get('wallapop_url', ''),
+                 'notion_url': f'https://www.notion.so/kliv/{d["notion_id"].replace("-", "")}'}
+                for d in to_delete_items
+            ],
+            'bad_urls_count': bad_urls_count,
+            'post_to_delete': post_to_delete,
+            'post_bad_urls': post_bad_urls,
+            'post_ok': post_ok
+        }
     }
     report_path = SCRIPT_DIR / 'temp' / 'daily_report.json'
     with open(report_path, 'w', encoding='utf-8') as f:
