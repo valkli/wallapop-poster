@@ -541,47 +541,35 @@ def main():
         if '/item/' in url:
             print(f'OK {url}'); return
 
-        # Check page content
-        content = page.content()
-        if any(kw in content.lower() for kw in ['publicado', 'subido', 'enhorabuena', 'felicita']):
-            log('✅ Success text found')
-            print(f'OK {url}'); return
+        # Always try to get real item URL from catalog/published
+        # This works regardless of where we ended up after submit
+        log('→ 12b. Fetching real item URL from catalog/published...')
+        try:
+            page.goto('https://es.wallapop.com/app/catalog/published',
+                      timeout=30_000, wait_until='domcontentloaded')
+            time.sleep(5)  # Let the catalog list render fully
 
-        # Try detecting success via catalog listing:
-        # If we landed on catalog/published (or similar) — fetch the real item URL
-        if 'catalog' in url.lower() and '/upload' not in url.lower():
-            log(f'  Redirected to catalog page: {url}')
-            log('→ 12b. Fetching real item URL from catalog/published...')
-            try:
-                page.goto('https://es.wallapop.com/app/catalog/published',
-                          timeout=30_000, wait_until='domcontentloaded')
-                time.sleep(4)  # Let the catalog list render
+            # Find the FIRST item link (most recently published)
+            item_url = page.evaluate("""() => {
+                const anchors = Array.from(document.querySelectorAll('a[href*="/item/"]'));
+                if (anchors.length > 0) {
+                    const href = anchors[0].getAttribute('href');
+                    if (href.startsWith('http')) return href;
+                    return 'https://es.wallapop.com' + href;
+                }
+                return null;
+            }""")
 
-                # Find the FIRST item link (most recently published)
-                item_url = page.evaluate("""() => {
-                    // Try all <a> tags whose href contains /item/
-                    const anchors = Array.from(document.querySelectorAll('a[href*="/item/"]'));
-                    if (anchors.length > 0) {
-                        const href = anchors[0].getAttribute('href');
-                        if (href.startsWith('http')) return href;
-                        return 'https://es.wallapop.com' + href;
-                    }
-                    return null;
-                }""")
-
-                if item_url and '/item/' in item_url:
-                    log(f'✅ Got real item URL from catalog: {item_url}')
-                    print(f'OK {item_url}'); return
-                else:
-                    log(f'⚠ No /item/ link found on catalog page')
-                    ss(page, 'catalog_published_debug')
-                    print('ERROR catalog_no_item_url'); return
-            except Exception as e:
-                log(f'⚠ Error fetching catalog/published: {e}')
-                print(f'ERROR catalog_fetch_failed url={url}'); return
-
-        log(f'⚠ Final URL: {url}')
-        print(f'ERROR no_redirect url={url}')
+            if item_url and '/item/' in item_url:
+                log(f'✅ Got real item URL from catalog: {item_url}')
+                print(f'OK {item_url}'); return
+            else:
+                log(f'⚠ No /item/ link found on catalog page')
+                ss(page, 'catalog_published_debug')
+                print(f'ERROR catalog_no_item_url final_url={url}'); return
+        except Exception as e:
+            log(f'⚠ Error fetching catalog/published: {e}')
+            print(f'ERROR catalog_fetch_failed url={url}'); return
 
 
 if __name__ == '__main__':
