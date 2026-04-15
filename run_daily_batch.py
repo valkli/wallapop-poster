@@ -39,6 +39,7 @@ IMG_HEADERS = {
 
 MAX_PRODUCTS = 8
 MIN_PRICE = 15.0
+REPORT_PATH = SCRIPT_DIR / 'temp' / 'daily_report.json'
 
 
 def run(cmd, timeout=60):
@@ -187,6 +188,25 @@ def run_cleanup(execute: bool = False) -> dict:
         return empty_report
 
 
+def save_report_snapshot(report: dict):
+    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(REPORT_PATH, 'w', encoding='utf-8') as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+
+def build_report(*, published, skipped, errors, cleanup, status='running', stale_safe=False):
+    return {
+        'date': datetime.now().strftime('%Y-%m-%d'),
+        'generated_at': datetime.now().isoformat(timespec='seconds'),
+        'status': status,
+        'stale_safe': stale_safe,
+        'published': published,
+        'skipped': skipped,
+        'errors': errors,
+        'cleanup': cleanup,
+    }
+
+
 def main():
     published = []
     skipped = []
@@ -197,6 +217,15 @@ def main():
     print(f'🛍️ Wallapop Daily Batch — {datetime.now().strftime("%Y-%m-%d %H:%M")}', flush=True)
     print(f'Target: {MAX_PRODUCTS} products', flush=True)
     print(f'{"="*60}\n', flush=True)
+
+    save_report_snapshot(build_report(
+        published=published,
+        skipped=skipped,
+        errors=errors,
+        cleanup={'phase': 'starting'},
+        status='running',
+        stale_safe=True,
+    ))
 
     # ── PRE-BATCH CLEANUP ─────────────────────────────────────
     print('🧹 Pre-batch cleanup (execute)...', flush=True)
@@ -214,6 +243,27 @@ def main():
     )
     print(f'  Still ok: {len(cleanup_report.get("ok", []))} listings', flush=True)
     print('', flush=True)
+
+    save_report_snapshot(build_report(
+        published=published,
+        skipped=skipped,
+        errors=errors,
+        cleanup={
+            'pre_deleted': deleted_count,
+            'pre_deleted_items': [
+                {'name': d['name'][:50], 'reason': d['reason'],
+                 'wallapop_url': d.get('wallapop_url', ''),
+                 'notion_url': f'https://www.notion.so/kliv/{d["notion_id"].replace("-", "")}' }
+                for d in to_delete_items
+            ],
+            'bad_urls_count': bad_urls_count,
+            'post_to_delete': None,
+            'post_bad_urls': None,
+            'post_ok': None
+        },
+        status='running',
+        stale_safe=True,
+    ))
 
     attempts = 0
     max_attempts = MAX_PRODUCTS + 10  # allow extra skips
@@ -276,6 +326,26 @@ def main():
                 print('  → Image not accessible (403/error). Skipping.', flush=True)
                 mark_no_image(notion_id)
                 skipped.append(f'{name[:40]} (фото 403)')
+                save_report_snapshot(build_report(
+                    published=published,
+                    skipped=skipped,
+                    errors=errors,
+                    cleanup={
+                        'pre_deleted': deleted_count,
+                        'pre_deleted_items': [
+                            {'name': d['name'][:50], 'reason': d['reason'],
+                             'wallapop_url': d.get('wallapop_url', ''),
+                             'notion_url': f'https://www.notion.so/kliv/{d["notion_id"].replace("-", "")}' }
+                            for d in to_delete_items
+                        ],
+                        'bad_urls_count': bad_urls_count,
+                        'post_to_delete': None,
+                        'post_bad_urls': None,
+                        'post_ok': None
+                    },
+                    status='running',
+                    stale_safe=True,
+                ))
                 continue
 
         # STEP 4: Navigate to upload form
@@ -295,6 +365,26 @@ def main():
             published_ids.add(notion_id)
             notion_url = f'https://www.notion.so/kliv/{notion_id.replace("-", "")}'
             published.append({'name': name[:50], 'price': price, 'donde': donde, 'url': url, 'notion_id': notion_id, 'notion_url': notion_url})
+            save_report_snapshot(build_report(
+                published=published,
+                skipped=skipped,
+                errors=errors,
+                cleanup={
+                    'pre_deleted': deleted_count,
+                    'pre_deleted_items': [
+                        {'name': d['name'][:50], 'reason': d['reason'],
+                         'wallapop_url': d.get('wallapop_url', ''),
+                         'notion_url': f'https://www.notion.so/kliv/{d["notion_id"].replace("-", "")}' }
+                        for d in to_delete_items
+                    ],
+                    'bad_urls_count': bad_urls_count,
+                    'post_to_delete': None,
+                    'post_bad_urls': None,
+                    'post_ok': None
+                },
+                status='running',
+                stale_safe=True,
+            ))
             # Anti-bot pause
             pause = random.randint(30, 60)
             print(f'  ⏳ Anti-bot pause: {pause}s...', flush=True)
@@ -302,6 +392,26 @@ def main():
         else:
             print(f'  ✗ Publish failed: {url}', flush=True)
             errors.append(f'{name[:40]}: {url[:80]}')
+            save_report_snapshot(build_report(
+                published=published,
+                skipped=skipped,
+                errors=errors,
+                cleanup={
+                    'pre_deleted': deleted_count,
+                    'pre_deleted_items': [
+                        {'name': d['name'][:50], 'reason': d['reason'],
+                         'wallapop_url': d.get('wallapop_url', ''),
+                         'notion_url': f'https://www.notion.so/kliv/{d["notion_id"].replace("-", "")}' }
+                        for d in to_delete_items
+                    ],
+                    'bad_urls_count': bad_urls_count,
+                    'post_to_delete': None,
+                    'post_bad_urls': None,
+                    'post_ok': None
+                },
+                status='running',
+                stale_safe=True,
+            ))
 
     # Final report
     print(f'\n{"="*60}', flush=True)
@@ -324,12 +434,11 @@ def main():
     print('', flush=True)
 
     # Save report for Telegram
-    report = {
-        'date': datetime.now().strftime('%Y-%m-%d'),
-        'published': published,
-        'skipped': skipped,
-        'errors': errors,
-        'cleanup': {
+    report = build_report(
+        published=published,
+        skipped=skipped,
+        errors=errors,
+        cleanup={
             'pre_deleted': deleted_count,
             'pre_deleted_items': [
                 {'name': d['name'][:50], 'reason': d['reason'],
@@ -341,12 +450,12 @@ def main():
             'post_to_delete': post_to_delete,
             'post_bad_urls': post_bad_urls,
             'post_ok': post_ok
-        }
-    }
-    report_path = SCRIPT_DIR / 'temp' / 'daily_report.json'
-    with open(report_path, 'w', encoding='utf-8') as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    print(f'Report saved: {report_path}', flush=True)
+        },
+        status='complete',
+        stale_safe=True,
+    )
+    save_report_snapshot(report)
+    print(f'Report saved: {REPORT_PATH}', flush=True)
 
     return report
 
