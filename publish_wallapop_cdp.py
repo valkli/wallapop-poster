@@ -114,7 +114,7 @@ def main():
     brand    = props.get('brand', '')
     model_s  = props.get('model', '')
     cat_wal  = props.get('Cat-Wallapop', 'Otros')
-    weight_g = props.get('Weight (g)', 0)
+    weight_g = props.get('Weight', 0)
 
     summary = name[:50]
 
@@ -326,12 +326,10 @@ def main():
         log('→ 9. Select Estado (condition)')
         estado_clicked = False
         
-        # Estado is a walla-dropdown: find the visible text input next to hidden input[name="condition"]
-        # The visible input has a UUID name. Find it via JS.
+        # Estado is a walla-dropdown: always select "Como nuevo"
         estado_uuid = page.evaluate("""() => {
             let hidden = document.querySelector('input[name="condition"]');
             if (!hidden) return null;
-            // The visible input is a sibling in the same walla-dropdown
             let parent = hidden.closest('walla-dropdown');
             if (!parent) parent = hidden.parentElement;
             let visible = parent.querySelector('input[type="text"]');
@@ -346,35 +344,43 @@ def main():
         if estado_uuid:
             log(f'  Estado dropdown opened (input: {estado_uuid})')
             time.sleep(2)
-            # Select "Como nuevo" or "En buen estado"
-            for cond in ['Como nuevo', 'En buen estado', 'Bueno', 'Nuevo']:
-                opt = page.locator(f'text="{cond}"')
-                if opt.count() > 0:
-                    for i in range(opt.count()):
-                        try:
-                            if opt.nth(i).is_visible(timeout=1000):
-                                opt.nth(i).click()
-                                log(f'✓ Estado: {cond}')
-                                estado_clicked = True
-                                break
-                        except Exception:
-                            continue
-                if estado_clicked:
-                    break
+            opt = page.locator('text="Como nuevo"')
+            if opt.count() > 0:
+                for i in range(opt.count()):
+                    try:
+                        if opt.nth(i).is_visible(timeout=1000):
+                            opt.nth(i).click()
+                            log('✓ Estado: Como nuevo')
+                            estado_clicked = True
+                            break
+                    except Exception:
+                        continue
         
         if not estado_clicked:
-            # Fallback: click label "Estado*" to open dropdown
             est_label = page.locator('text="Estado*"')
             if est_label.count() > 0:
                 est_label.first.click()
                 time.sleep(2)
-                for cond in ['Como nuevo', 'En buen estado', 'Bueno']:
-                    opt = page.locator(f'text="{cond}"')
-                    if opt.count() > 0 and opt.first.is_visible():
-                        opt.first.click()
-                        log(f'✓ Estado (label click): {cond}')
-                        estado_clicked = True
-                        break
+                opt = page.locator('text="Como nuevo"')
+                if opt.count() > 0 and opt.first.is_visible():
+                    opt.first.click()
+                    log('✓ Estado (label click): Como nuevo')
+                    estado_clicked = True
+                    
+        if not estado_clicked:
+            result = page.evaluate("""() => {
+                const labels = Array.from(document.querySelectorAll('*')).filter(el =>
+                    el.textContent && el.textContent.trim() === 'Como nuevo' && el.offsetParent !== null
+                );
+                if (labels.length) {
+                    labels[0].click();
+                    return true;
+                }
+                return false;
+            }""")
+            if result:
+                log('✓ Estado (JS): Como nuevo')
+                estado_clicked = True
         
         if not estado_clicked:
             log('⚠ Estado NOT SET')
