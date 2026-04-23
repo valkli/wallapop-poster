@@ -50,16 +50,24 @@ def ensure_browser():
     try:
         urllib.request.urlopen(f'{CDP_URL}/json/version', timeout=3)
         return True
-    except Exception: pass
+    except Exception:
+        pass
     import subprocess
-    subprocess.Popen([CHROMIUM_PATH, f'--user-data-dir={BROWSER_PROFILE}',
-                      f'--remote-debugging-port={CDP_PORT}', '--no-first-run', 'about:blank'])
-    for _ in range(10):
+    subprocess.Popen([
+        CHROMIUM_PATH,
+        f'--user-data-dir={BROWSER_PROFILE}',
+        f'--remote-debugging-port={CDP_PORT}',
+        '--no-first-run',
+        '--new-window',
+        UPLOAD_URL,
+    ])
+    for _ in range(15):
         time.sleep(2)
         try:
             urllib.request.urlopen(f'{CDP_URL}/json/version', timeout=3)
             return True
-        except Exception: pass
+        except Exception:
+            pass
     return False
 
 def fill(page, sel, value, label=''):
