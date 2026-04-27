@@ -44,8 +44,16 @@ REPORT_PATH = SCRIPT_DIR / 'temp' / 'daily_report.json'
 
 def run(cmd, timeout=60):
     """Run a subprocess command and return stdout."""
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(WORKSPACE))
-    return result.stdout.strip(), result.stderr.strip(), result.returncode
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        timeout=timeout,
+        cwd=str(WORKSPACE),
+    )
+    return (result.stdout or '').strip(), (result.stderr or '').strip(), result.returncode
 
 
 def fetch_next_product():

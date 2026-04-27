@@ -284,7 +284,7 @@ def execute_cleanup(report: dict) -> dict:
     - bad_urls  → left as-is (user fixes manually)
     Returns stats dict.
     """
-    stats = {'deleted': 0, 'errors': 0}
+    stats = {'deleted': 0, 'bad_url_reset': 0, 'errors': 0}
 
     for item in report['to_delete']:
         nid = item['notion_id']
