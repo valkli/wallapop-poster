@@ -21,6 +21,7 @@ Output:  OK <url>  |  ERROR <msg>
 import sys, json, time, urllib.request
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from wallapop_safe import catalog_api_js, choose_unique_match, is_safe_catalog_match
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
@@ -110,6 +111,33 @@ def weight_from_grams(g):
     return 5
 
 
+
+def extract_catalog_candidates(page):
+    """Fetch full active Wallapop management catalog via API, all pages."""
+    try:
+        result = page.evaluate(catalog_api_js())
+        if isinstance(result, dict) and result.get('error'):
+            log(f"⚠ Catalog API error: {result.get('error')} status={result.get('status')} text={result.get('text')}")
+            return []
+        rows = (result or {}).get('data', []) if isinstance(result, dict) else []
+        out = []
+        for item in rows:
+            price = item.get('price')
+            title = item.get('title') or ''
+            title_with_price = f"{title} {int(price)} €" if price not in (None, '') else title
+            out.append({
+                'id': item.get('id', ''),
+                'href': item.get('href', ''),
+                'title': title_with_price,
+                'published': str(item.get('published', '')),
+                'price': price,
+            })
+        log(f'✓ Catalog API items loaded: {len(out)}')
+        return out
+    except Exception as e:
+        log(f'⚠ Catalog API fetch failed: {e}')
+        return []
+
 # ═══════════════════════════ MAIN ════════════════════════════════
 
 def main():
@@ -125,6 +153,7 @@ def main():
     weight_g = props.get('Weight', 0)
 
     summary = name[:50]
+    expected_catalog_title = name
 
     log(f'Product: {name[:60]}')
     log(f'Price: {price}€ | Cat: {cat_wal} | Weight: {weight_g}g')
@@ -140,6 +169,20 @@ def main():
         for pg in context.pages:
             if 'wallapop.com' in pg.url: page = pg; break
         if not page: page = context.new_page()
+
+        # ── 0. Pre-check existing catalog listing across ALL catalog pages ──
+        log('→ 0. Check existing full catalog match')
+        page.goto('https://es.wallapop.com/app/catalog/management/consumergoods', timeout=60_000, wait_until='domcontentloaded')
+        time.sleep(5)
+        if 'login' in page.url.lower() or 'onboarding' in page.url.lower(): print('ERROR not_logged_in'); return
+        existing = choose_unique_match(name, price, extract_catalog_candidates(page))
+        if existing.get('status') == 'unique_match':
+            match = existing['match']
+            log(f"✅ Existing catalog listing matched: {match.get('href')} (score={match.get('_score')}, title={match.get('title', '')[:80]!r})")
+            print(f"OK {match.get('href')}"); return
+        if existing.get('status') == 'ambiguous':
+            log(f"⚠ Ambiguous existing catalog matches: {len(existing.get('matches', []))}")
+            print('ERROR existing_catalog_ambiguous'); return
 
         # ── 1. Navigate ──────────────────────────────────────────
         log('→ 1. Navigate')
@@ -292,10 +335,13 @@ def main():
                 if not current_title or len(current_title) < 5:
                     title_loc.first.click()
                     time.sleep(0.3)
-                    title_loc.first.fill(name[:80])
+                    manual_title = name[:80]
+                    title_loc.first.fill(manual_title)
+                    expected_catalog_title = manual_title
                     log(f'✓ Title (manual): "{name[:40]}"')
                 else:
-                    log(f'✓ Title (AI): "{current_title[:40]}"')
+                    expected_catalog_title = current_title
+                log(f'✓ Title (AI): "{current_title[:40]}"')
             except Exception as e:
                 log(f'⚠ Title error: {e}')
 
@@ -555,34 +601,35 @@ def main():
         if '/item/' in url:
             print(f'OK {url}'); return
 
-        # Always try to get real item URL from catalog/published
-        # This works regardless of where we ended up after submit
-        log('→ 12b. Fetching real item URL from catalog/published...')
+        # Always fetch real item URL from the full management catalog with safe matching.
+        log('→ 12b. Fetching real item URL from full catalog (safe match)...')
         try:
-            page.goto('https://es.wallapop.com/app/catalog/published',
-                      timeout=30_000, wait_until='domcontentloaded')
-            time.sleep(5)  # Let the catalog list render fully
-
-            # Find the FIRST item link (most recently published)
-            item_url = page.evaluate("""() => {
-                const anchors = Array.from(document.querySelectorAll('a[href*="/item/"]'));
-                if (anchors.length > 0) {
-                    const href = anchors[0].getAttribute('href');
-                    if (href.startsWith('http')) return href;
-                    return 'https://es.wallapop.com' + href;
-                }
-                return null;
-            }""")
-
-            if item_url and '/item/' in item_url:
-                log(f'✅ Got real item URL from catalog: {item_url}')
-                print(f'OK {item_url}'); return
-            else:
-                log(f'⚠ No /item/ link found on catalog page')
-                ss(page, 'catalog_published_debug')
-                print(f'ERROR catalog_no_item_url final_url={url}'); return
+            if 'management/consumergoods' not in page.url:
+                page.goto('https://es.wallapop.com/app/catalog/management/consumergoods',
+                          timeout=30_000, wait_until='domcontentloaded')
+                time.sleep(5)
+            best = None
+            items = []
+            for attempt in range(1, 7):
+                if attempt > 1:
+                    log(f'  Retry catalog match #{attempt} after reload...')
+                    page.reload(timeout=30_000, wait_until='domcontentloaded')
+                    time.sleep(10)
+                items = extract_catalog_candidates(page)
+                result = choose_unique_match(expected_catalog_title, price, items)
+                if result.get('status') == 'unique_match':
+                    best = result['match']
+                    log(f"✅ Got matched item URL from catalog: {best.get('href')} (score={best.get('_score')}, title={best.get('title', '')[:80]!r})")
+                    print(f"OK {best.get('href')}"); return
+                if result.get('status') == 'ambiguous':
+                    log(f"⚠ Ambiguous catalog matches after submit: {len(result.get('matches', []))}")
+                    ss(page, 'catalog_published_debug')
+                    print('ERROR catalog_match_ambiguous'); return
+            log(f'⚠ No safely matched /item/ URL found on full catalog, items={len(items or [])}')
+            ss(page, 'catalog_published_debug')
+            print(f'ERROR catalog_match_not_found final_url={url}'); return
         except Exception as e:
-            log(f'⚠ Error fetching catalog/published: {e}')
+            log(f'⚠ Error fetching catalog: {e}')
             print(f'ERROR catalog_fetch_failed url={url}'); return
 
 

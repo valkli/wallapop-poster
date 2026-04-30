@@ -18,3 +18,47 @@
 
 ## 2026-04-27 — Wallapop relink GangaBox
 - По каталогу Wallapop alery-474023510 восстановлены 77 уверенных ссылок в Notion Product_Variants_GangaBox (2bd12f742f9e8198bfb3dce06af14f58), backups/plans: wallapop-poster/temp/wallapop_relink_*_20260427-232846.json; MixMix Product_Variants дал 0 совпадений.
+
+## 2026-04-29 — Wallapop Daily Job
+- 15:00 run: published 1, skipped 17, errors 0; report sent to Telegram topic 4. Details in global memory/2026-04-29.md.
+
+
+## Кодовое лечение OpenClaw Wallapop проектов — 2026-04-30 01:00:48
+
+Внесены fixes во все три проекта после удаления дублей:
+
+- Добавлен общий `wallapop_safe.py` в `wallapop-poster`, `wallapop-poster2`, `wallapop-poster3`:
+  - нормализация title;
+  - безопасный matcher title + exact/close price + model-like tokens;
+  - `choose_unique_match()` возвращает `unique_match`, `ambiguous`, `no_match`;
+  - JS для чтения полного Wallapop management catalog через API по всем страницам.
+- Добавлены `test_wallapop_safe.py` во все три проекта.
+- `publish_wallapop_cdp.py`:
+  - `wallapop-poster`: добавлен full-catalog pre-check перед публикацией и safe URL capture после submit; больше не берет первый `/item/` из каталога.
+  - `wallapop-poster2`: catalog extractor переведен на полный API catalog; matching использует общий safe matcher; сохранены retries после submit.
+  - `wallapop-poster3`: catalog extractor переведен на полный API catalog; добавлен full-catalog pre-check; matching использует общий safe matcher.
+- `fetch_product_for_wallapop.py`:
+  - `wallapop-poster3`: удален фильтр `Selling Price > 15`; теперь, как подтвердил Валерий, цена не важна, важен `In Stock=true`.
+  - `wallapop-poster2`: цена и раньше не фильтровалась, оставлено.
+  - `wallapop-poster`: price threshold оставлен.
+- `cleanup_wallapop.py`:
+  - `wallapop-poster3`: создан отсутствующий cleanup.
+  - `wallapop-poster` и `wallapop-poster2`: execute теперь сначала пытается физически удалить Wallapop listing через management API, и только потом чистит Notion.
+  - `wallapop-poster`: cleanup scope ограничен `Wal 1=true`, чтобы не трогать poster2/poster3 строки.
+  - `NO-IMAGE-SKIP`/не-item markers классифицируются как bad_url/marker, а не физическое удаление.
+- `wallapop-poster2/temp/POSTING_PAUSED.txt` архивирован как resolved после лечения, чтобы OpenClaw мог запускать проект.
+
+Проверки:
+- Backup перед правками: `temp/backup-before-wallapop-heal-20260430-004902/` в каждом проекте.
+- `python -m py_compile` всех `.py` файлов трех проектов: OK.
+- `pytest test_wallapop_safe.py -q` в каждом проекте: 4 passed.
+- `cleanup_wallapop.py` dry-run через Windows Python:
+  - poster: to_delete=0, bad_urls=77, ok=410;
+  - poster2: to_delete=7, bad_urls=13, ok=65;
+  - poster3: to_delete=162, bad_urls=93, ok=147.
+- `fetch_product_for_wallapop.py` smoke для всех трех проектов: OK, каждый выбрал следующий товар.
+
+Важно:
+- Массовую публикацию здесь не запускали.
+- Cleanup execute здесь после лечения не запускали.
+- OpenClaw browser profiles в проектах не заменялись на личные Chrome profiles Валерия.

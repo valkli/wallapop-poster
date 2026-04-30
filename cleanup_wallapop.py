@@ -32,6 +32,8 @@ import json
 import time
 import requests
 from pathlib import Path
+from playwright.sync_api import sync_playwright
+from wallapop_safe import catalog_api_js
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
@@ -53,6 +55,7 @@ DB_VARIANTS = '27f12f742f9e81648959ee3d597c4e7e'   # Product_Variants
 # Valid donde values
 VALID_DONDE = {'magazin', 'sklad'}
 MIN_PRICE = 15.0
+CDP_URL = 'http://127.0.0.1:18801'
 
 
 def log(msg):
@@ -160,10 +163,31 @@ def classify_page(page: dict) -> dict:
     donde = get_select(props.get('donde'))
     sold = get_checkbox(props.get('Sold'))
     in_stock = get_checkbox(props.get('In Stock'))
+    wal_1 = get_checkbox(props.get('Wal 1'))
 
     notion_id = page.get('id', '')
 
-    # 1. Bad URL check (must come BEFORE other checks so we can flag separately)
+    # wallapop-poster owns only Wal 1 rows. Rows without Wal 1 may belong to
+    # poster2/poster3 and must not be deleted/cleared by this project.
+    if not wal_1:
+        return {
+            'notion_id': notion_id,
+            'name': name,
+            'wallapop_url': wallapop_url,
+            'status': 'ok',
+            'reason': 'not_scope_wal1_false'
+        }
+
+    # 1. Bad URL / marker check (must come BEFORE other checks so we can flag separately)
+    if wallapop_url and '/item/' not in wallapop_url:
+        return {
+            'notion_id': notion_id,
+            'name': name,
+            'wallapop_url': wallapop_url,
+            'status': 'bad_url',
+            'reason': 'non_item_url_or_marker'
+        }
+
     if 'catalog/published' in wallapop_url or (
         'catalog' in wallapop_url and '/item/' not in wallapop_url
     ):
@@ -215,15 +239,8 @@ def classify_page(page: dict) -> dict:
             'reason': f'donde_changed ({donde})'
         }
 
-    # 6. In Stock = True means the item is back in physical stock (not online)
-    if in_stock:
-        return {
-            'notion_id': notion_id,
-            'name': name,
-            'wallapop_url': wallapop_url,
-            'status': 'to_delete',
-            'reason': 'in_stock_true'
-        }
+    # 6. In Stock is intentionally NOT a delete criterion here; Valery defined
+    # poster's scope as Wal 1 across both Product_Variants DBs.
 
     # All checks passed — listing is still valid
     return {
@@ -234,6 +251,58 @@ def classify_page(page: dict) -> dict:
         'reason': ''
     }
 
+
+
+def delete_wallapop_listing_by_url(wallapop_url: str) -> bool:
+    """Physically delete/deactivate a Wallapop listing through the logged-in management API.
+
+    Returns True only when no live matching listing is found or Wallapop DELETE succeeds.
+    Notion must be cleared only after this returns True.
+    """
+    if not wallapop_url or '/item/' not in wallapop_url:
+        log(f'  ⚠ Cannot physically delete non-item URL: {wallapop_url}')
+        return False
+    slug = wallapop_url.rstrip('/').split('/item/', 1)[-1]
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(CDP_URL)
+            context = browser.contexts[0]
+            page = None
+            for pg in context.pages:
+                if 'wallapop.com' in pg.url:
+                    page = pg
+                    break
+            if page is None:
+                page = context.new_page()
+            page.goto('https://es.wallapop.com/app/catalog/management/consumergoods', timeout=60_000, wait_until='domcontentloaded')
+            page.wait_for_timeout(5000)
+            catalog = page.evaluate(catalog_api_js())
+            rows = catalog.get('data', []) if isinstance(catalog, dict) else []
+            item_id = None
+            for item in rows:
+                if item.get('slug') == slug or item.get('href') == wallapop_url:
+                    item_id = item.get('id')
+                    break
+            if not item_id:
+                log(f'  ✓ Wallapop listing already absent: {slug}')
+                return True
+            result = page.evaluate("""async (id) => {
+                const token = (document.cookie.split('; ').find(x => x.startsWith('accessToken=')) || '').split('=').slice(1).join('=');
+                const r = await fetch('https://api.wallapop.com/api/v3/items', {
+                  method: 'DELETE',
+                  headers: {'content-type':'application/json','authorization':'Bearer '+token,'x-deviceos':'0','deviceos':'0','x-appversion':'820020','x-deviceid':'fdcc5f3b-ce99-44d9-ae00-bd62f3bba613'},
+                  body: JSON.stringify({ids:[id]})
+                });
+                return {status:r.status, ok:r.ok, text:(await r.text()).slice(0,500)};
+            }""", item_id)
+            if result and result.get('ok'):
+                log(f'  ✓ Wallapop deleted: {slug} ({item_id})')
+                return True
+            log(f'  ✗ Wallapop delete failed: {slug} result={result}')
+            return False
+    except Exception as e:
+        log(f'  ✗ Wallapop physical delete exception: {e}')
+        return False
 
 def clear_notion_wallapop_fields(notion_id: str, clear_wal1: bool = True) -> bool:
     """Clear `Wallapop Posted` and optionally `Wal 1` for a Notion page."""
@@ -289,7 +358,13 @@ def execute_cleanup(report: dict) -> dict:
     for item in report['to_delete']:
         nid = item['notion_id']
         name = item['name'][:40]
-        log(f'  🗑 Clearing: {name} ({item.get("reason", "")})')
+        log(f'  🗑 Deleting Wallapop then clearing Notion: {name} ({item.get("reason", "")})')
+        ok_wallapop = delete_wallapop_listing_by_url(item.get('wallapop_url', ''))
+        if not ok_wallapop:
+            stats['errors'] += 1
+            log(f'    ✗ Wallapop delete failed, Notion left unchanged: {nid[:8]}...')
+            time.sleep(0.3)
+            continue
         ok = clear_notion_wallapop_fields(nid, clear_wal1=True)
         if ok:
             stats['deleted'] += 1
