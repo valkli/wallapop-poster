@@ -40,6 +40,35 @@ IMG_HEADERS = {
 MAX_PRODUCTS = 8
 MIN_PRICE = 15.0
 REPORT_PATH = SCRIPT_DIR / 'temp' / 'daily_report.json'
+PUBLISHED_TODAY_PATH = SCRIPT_DIR / 'temp' / 'published_today.json'
+FAILED_TODAY_PATH = SCRIPT_DIR / 'temp' / 'failed_today.json'
+
+
+def load_tracker(path: Path) -> set:
+    """Load a date-scoped notion_id tracker."""
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            if data.get('date') == datetime.now().strftime('%Y-%m-%d'):
+                return set(data.get('ids', []))
+        except Exception:
+            pass
+    return set()
+
+
+def save_tracker(path: Path, ids: set):
+    """Persist a date-scoped notion_id tracker."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        'date': datetime.now().strftime('%Y-%m-%d'),
+        'ids': list(ids),
+    }, ensure_ascii=False), encoding='utf-8')
+
+
+def add_tracker_id(path: Path, notion_id: str):
+    ids = load_tracker(path)
+    ids.add(notion_id)
+    save_tracker(path, ids)
 
 
 def run(cmd, timeout=60):
@@ -148,26 +177,17 @@ def update_notion(notion_id, url):
 
 def load_published_ids():
     """Load set of notion_ids already published today (prevents duplicates)."""
-    tracker = SCRIPT_DIR / 'temp' / 'published_today.json'
-    if tracker.exists():
-        try:
-            data = json.loads(tracker.read_text())
-            if data.get('date') == datetime.now().strftime('%Y-%m-%d'):
-                return set(data.get('ids', []))
-        except Exception:
-            pass
-    return set()
+    return load_tracker(PUBLISHED_TODAY_PATH)
 
 
 def save_published_id(notion_id):
     """Append a notion_id to today's published tracker."""
-    tracker = SCRIPT_DIR / 'temp' / 'published_today.json'
-    ids = load_published_ids()
-    ids.add(notion_id)
-    tracker.write_text(json.dumps({
-        'date': datetime.now().strftime('%Y-%m-%d'),
-        'ids': list(ids)
-    }))
+    add_tracker_id(PUBLISHED_TODAY_PATH, notion_id)
+
+
+def save_failed_id(notion_id):
+    """Append a notion_id to today's failed tracker to avoid repost loops."""
+    add_tracker_id(FAILED_TODAY_PATH, notion_id)
 
 
 def run_cleanup(execute: bool = False) -> dict:
@@ -220,6 +240,8 @@ def main():
     skipped = []
     errors = []
     published_ids = load_published_ids()
+    failed_ids = load_tracker(FAILED_TODAY_PATH)
+    seen_failed_this_run = set()
 
     print(f'\n{"="*60}', flush=True)
     print(f'🛍️ Wallapop Daily Batch — {datetime.now().strftime("%Y-%m-%d %H:%M")}', flush=True)
@@ -236,8 +258,8 @@ def main():
     ))
 
     # ── PRE-BATCH CLEANUP ─────────────────────────────────────
-    print('🧹 Pre-batch cleanup (execute)...', flush=True)
-    cleanup_report = run_cleanup(execute=True)
+    print('🧹 Pre-batch cleanup status (dry-run)...', flush=True)
+    cleanup_report = run_cleanup(execute=False)
     stats = cleanup_report.get('_stats', {})
     deleted_count = stats.get('deleted', 0)
     errors_count = stats.get('errors', 0)
@@ -317,6 +339,15 @@ def main():
             skipped.append(f'{name[:40]} (дубль)')
             continue
 
+        # Safety check: if publishing this item already failed today, do not
+        # retry it in a loop. A failure after submit can still create a public
+        # Wallapop listing while URL matching fails; retrying the same Notion
+        # row is exactly how duplicate public listings are produced.
+        if notion_id in failed_ids or notion_id in seen_failed_this_run:
+            print('  → SKIP: already failed today (prevents repost duplicate loop)', flush=True)
+            skipped.append(f'{name[:40]} (failed_today)')
+            continue
+
         # STEP 3: Check image
         if not images:
             print('  → No images. Skipping.', flush=True)
@@ -368,7 +399,13 @@ def main():
         if success:
             print(f'  ✅ Published: {url}', flush=True)
             # STEP 7: Update Notion + dedup tracker
-            update_notion(notion_id, url)
+            if not update_notion(notion_id, url):
+                print('  ✗ Notion update failed after Wallapop URL was found; stopping retries for this item today', flush=True)
+                errors.append(f'{name[:40]}: notion_update_failed {url[:80]}')
+                seen_failed_this_run.add(notion_id)
+                save_failed_id(notion_id)
+                failed_ids.add(notion_id)
+                continue
             save_published_id(notion_id)
             published_ids.add(notion_id)
             notion_url = f'https://www.notion.so/kliv/{notion_id.replace("-", "")}'
@@ -400,6 +437,9 @@ def main():
         else:
             print(f'  ✗ Publish failed: {url}', flush=True)
             errors.append(f'{name[:40]}: {url[:80]}')
+            seen_failed_this_run.add(notion_id)
+            save_failed_id(notion_id)
+            failed_ids.add(notion_id)
             save_report_snapshot(build_report(
                 published=published,
                 skipped=skipped,
@@ -420,6 +460,9 @@ def main():
                 status='running',
                 stale_safe=True,
             ))
+            if 'catalog_match_not_found' in (url or '') or 'catalog_fetch_failed' in (url or ''):
+                print('  🛑 STOP: URL matching failed after submit. Batch halted to avoid orphan/duplicate listings.', flush=True)
+                break
 
     # Final report
     print(f'\n{"="*60}', flush=True)

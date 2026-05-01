@@ -110,41 +110,73 @@ def choose_unique_match(name: str, price: Any, items: Iterable[Dict[str, Any]]) 
 
 
 def catalog_api_js() -> str:
-    """Async JS expression body returning all active catalog-management items."""
+    """Async JS expression body returning active catalog items.
+
+    It combines the logged-in management catalog first page (important for fresh
+    just-submitted listings) with the full public user catalog (important for
+    older listings past the first management page). The management API pagination
+    is unstable, but the public user API paginates reliably via meta.next/since.
+    """
+    public_user_id = "p61oqpn0oxj5"
     return r"""
     async () => {
-      const token = (document.cookie.split('; ').find(x => x.startsWith('accessToken=')) || '').split('=').slice(1).join('=');
-      const headers = {
-        'content-type': 'application/json',
-        'authorization': 'Bearer ' + token,
-        'x-deviceos': '0',
-        'deviceos': '0',
-        'x-appversion': '820020',
-        'x-deviceid': 'fdcc5f3b-ce99-44d9-ae00-bd62f3bba613'
-      };
+      const publicUserId = 'p61oqpn0oxj5';
       const out = [];
+      const seen = new Set();
+      const addItem = (item) => {
+        if (!item) return;
+        const slug = item.slug || item.web_slug || '';
+        const href = slug ? 'https://es.wallapop.com/item/' + slug : (item.href || '');
+        const id = item.id || href || item.slug || '';
+        const key = id || href;
+        if (key && seen.has(key)) return;
+        if (key) seen.add(key);
+        out.push({
+          id,
+          title: item.title || '',
+          price: item.price && item.price.amount !== undefined ? item.price.amount : item.price,
+          href,
+          slug,
+          published: item.publish_date || item.modified_date || item.created_at || '',
+          source: item.source || ''
+        });
+      };
+
+      const token = (document.cookie.split('; ').find(x => x.startsWith('accessToken=')) || '').split('=').slice(1).join('=');
+      if (token) {
+        const headers = {
+          'content-type': 'application/json',
+          'authorization': 'Bearer ' + token,
+          'x-deviceos': '0',
+          'deviceos': '0',
+          'x-appversion': '820020',
+          'x-deviceid': 'fdcc5f3b-ce99-44d9-ae00-bd62f3bba613'
+        };
+        const body = {filter:{status:'active', type:'CONSUMERGOODS'}, sort:{property:'publish_date', order:'desc'}};
+        try {
+          const r = await fetch('https://api.wallapop.com/api/v3/catalog-management/search', {
+            method:'POST', headers, body: JSON.stringify(body)
+          });
+          if (r.ok) {
+            const j = await r.json();
+            for (const item of (j.data || [])) addItem(Object.assign({source:'management'}, item));
+          }
+        } catch (e) {}
+      }
+
       let next = null;
       const seenNext = new Set();
-      for (let page = 0; page < 30; page++) {
-        const body = {filter:{status:'active', type:'CONSUMERGOODS'}, sort:{property:'publish_date', order:'desc'}};
-        if (next) body.search_after = next;
-        const r = await fetch('https://api.wallapop.com/api/v3/catalog-management/search', {
-          method:'POST', headers, body: JSON.stringify(body)
-        });
-        if (!r.ok) return {error:'catalog_search_failed', status:r.status, text:(await r.text()).slice(0,500), data:out};
-        const j = await r.json();
-        for (const item of (j.data || [])) {
-          const slug = item.slug || item.web_slug || '';
-          out.push({
-            id: item.id || '',
-            title: item.title || '',
-            price: item.price && item.price.amount,
-            href: slug ? 'https://es.wallapop.com/item/' + slug : '',
-            slug,
-            published: item.publish_date || item.modified_date || '',
-          });
+      for (let page = 0; page < 50; page++) {
+        const url = new URL('https://api.wallapop.com/api/v3/users/' + publicUserId + '/items');
+        if (next) url.searchParams.set('since', next);
+        const r = await fetch(url.toString(), {headers: {'accept':'application/json', 'x-deviceos':'0'}});
+        if (!r.ok) {
+          if (out.length) return {data: out, warning:'public_catalog_page_failed', status:r.status, text:(await r.text()).slice(0,300)};
+          return {error:'public_catalog_failed', status:r.status, text:(await r.text()).slice(0,300), data:out};
         }
-        next = j.meta && (j.meta.next || j.meta.search_after || j.meta.since);
+        const j = await r.json();
+        for (const item of (j.data || [])) addItem(Object.assign({source:'public'}, item));
+        next = j.meta && j.meta.next;
         if (!next || seenNext.has(next)) break;
         seenNext.add(next);
       }

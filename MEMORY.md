@@ -62,3 +62,13 @@
 - Массовую публикацию здесь не запускали.
 - Cleanup execute здесь после лечения не запускали.
 - OpenClaw browser profiles в проектах не заменялись на личные Chrome profiles Валерия.
+
+## 2026-04-30 run attempt — base wallapop-poster
+- Valery asked to run the base wallapop-poster (not poster2/3). Verified project docs, ran py_compile OK, then launched 
+un_daily_batch.py on profile mixmix/CDP 18801.
+- First run looped on the same failed Notion row (CIEEIN CIEHT Mantel...) because ailed_today.json was not excluded by fetch. Patched etch_product_for_wallapop.py to page through up to 25 results and skip IDs in ailed_today.json/published_today.json.
+- Patched 
+un_daily_batch.py to use pre-batch cleanup dry-run instead of execute, and to halt on catalog_match_not_found/catalog_fetch_failed after submit to avoid duplicates/orphans.
+- Copied the more robust Poster2 publish_wallapop_cdp.py base and adapted it to mixmix/18801; also changed publish to use a fresh Wallapop tab because the mixmix profile had multiple stale Wallapop tabs.
+- Despite fixes, live posting did not complete: attempts hit catalog_match_not_found, Continuar disabled timeouts, file upload timeout, and finally BrowserType.connect_over_cdp timeout on 18801. The last live batch was killed safely before more attempts. No confirmed Notion URL updates from this run.
+- Cleanup dry-run showed roughly Total: 496 published listings, 	o_delete=10, ad_urls=77, ok=409; no cleanup execute/deletion performed. Next step: stabilize/clean the mixmix browser profile/CDP session (too many stale tabs / CDP sluggish) and then retry a small 1-item smoke before batch.

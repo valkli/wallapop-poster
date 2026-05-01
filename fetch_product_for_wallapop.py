@@ -43,6 +43,21 @@ HEADERS = {
 OUT_DIR  = Path(__file__).parent / 'temp'
 OUT_FILE = OUT_DIR / 'product_data.json'
 CURSOR_FILE = OUT_DIR / 'wal_db_cursor.json'
+FAILED_TODAY_FILE = OUT_DIR / 'failed_today.json'
+PUBLISHED_TODAY_FILE = OUT_DIR / 'published_today.json'
+
+
+def load_local_skip_ids() -> set[str]:
+    ids = set()
+    for path in (FAILED_TODAY_FILE, PUBLISHED_TODAY_FILE):
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            ids.update(x for x in data.get('ids', []) if x)
+        except Exception:
+            pass
+    return ids
 
 
 def get_next_db_id():
@@ -96,10 +111,11 @@ def build_filter():
 
 def fetch_next_pending(db_id):
     """Query Notion for the next matching product in db_id. Returns page or None."""
+    skip_ids = load_local_skip_ids()
     payload = {
         "filter": build_filter(),
         "sorts": [{"property": "Created time", "direction": "ascending"}],
-        "page_size": 1
+        "page_size": 25
     }
     resp = requests.post(
         f'https://api.notion.com/v1/databases/{db_id}/query',
@@ -112,7 +128,10 @@ def fetch_next_pending(db_id):
         print(f'ERROR: Notion {resp.status_code}: {resp.text[:200]}')
         sys.exit(1)
     results = resp.json().get('results', [])
-    return results[0] if results else None
+    for page in results:
+        if page.get('id') not in skip_ids:
+            return page
+    return None
 
 
 def fetch_from_any_db():
