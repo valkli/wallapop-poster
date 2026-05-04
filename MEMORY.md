@@ -72,3 +72,7 @@ un_daily_batch.py to use pre-batch cleanup dry-run instead of execute, and to ha
 - Copied the more robust Poster2 publish_wallapop_cdp.py base and adapted it to mixmix/18801; also changed publish to use a fresh Wallapop tab because the mixmix profile had multiple stale Wallapop tabs.
 - Despite fixes, live posting did not complete: attempts hit catalog_match_not_found, Continuar disabled timeouts, file upload timeout, and finally BrowserType.connect_over_cdp timeout on 18801. The last live batch was killed safely before more attempts. No confirmed Notion URL updates from this run.
 - Cleanup dry-run showed roughly Total: 496 published listings, 	o_delete=10, ad_urls=77, ok=409; no cleanup execute/deletion performed. Next step: stabilize/clean the mixmix browser profile/CDP session (too many stale tabs / CDP sluggish) and then retry a small 1-item smoke before batch.
+
+## Session close 2026-05-03
+- Базовый wallapop-poster запускался по команде Валерия через mixmix/18801. Исправлены: fetch skip для ailed_today/published_today, pre-cleanup dry-run, halt на catalog_match_not_found, свежий tab per publish.
+- Запуск остановлен безопасно: CDP/browser session 18801 нестабилен (stale tabs, disabled Continuar, upload timeout, connect_over_cdp timeout). Подтверждённых публикаций/Notion updates нет. Следующий шаг: стабилизировать профиль mixmix и делать 1-item smoke.
